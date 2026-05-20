@@ -205,7 +205,7 @@
 ### ⚡ One-Line Install (từ GitHub)
 
 ```bash
-curl -sL https://raw.githubusercontent.com/ryzen30xx/Screen-manager/main/install-screen-tui.sh | bash
+curl -sL https://raw.githubusercontent.com/isharoverwhite/Screen-manager/main/install-screen-tui.sh | bash
 ```
 
 > 💡 File installer là **plain text** — mở ra đọc được ngay, không mã hoá, không base64.

@@ -5,10 +5,10 @@
 <!-- ========================================================================= -->
 
 <p align="center">
-  <img src="https://img.shields.io/badge/phi%C3%AAn%20b%E1%BA%A3n-5.1.0-brightgreen?style=for-the-badge&logo=gnu&logoColor=white" alt="Version 5.1.0">
-  <img src="https://img.shields.io/badge/n%E1%BB%81n%20t%E1%BA%A3ng-Bash%20thu%E1%BA%A7n-4EAA25?style=for-the-badge&logo=gnu-bash&logoColor=white" alt="Platform: Pure Bash">
-  <img src="https://img.shields.io/badge/gi%E1%BA%A5y%20ph%C3%A9p-MIT-blue?style=for-the-badge" alt="License: MIT">
-  <img src="https://img.shields.io/badge/tr%C3%ACnh%20qu%E1%BA%A3n%20l%C3%BD-Screen-cyan?style=for-the-badge&logo=gnu&logoColor=white" alt="GNU Screen">
+  <img src="https://img.shields.io/badge/version-5.1.0-brightgreen?style=for-the-badge&logo=gnu&logoColor=white" alt="Version 5.1.0">
+  <img src="https://img.shields.io/badge/platform-Pure%20Bash-4EAA25?style=for-the-badge&logo=gnu-bash&logoColor=white" alt="Platform: Pure Bash">
+  <img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="License: MIT">
+  <img src="https://img.shields.io/badge/manager-Screen-cyan?style=for-the-badge&logo=gnu&logoColor=white" alt="GNU Screen">
 </p>
 
 <br>

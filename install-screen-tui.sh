@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
 # install-screen-tui.sh — Self-Contained Installer for screen-tui
-# Version: 2.3.0
+# Version: 3.0.0
 # Description: Single-file installer with the full screen-tui script embedded
 #              in PLAIN TEXT at the end of this file. No encoding, no base64.
 #              Open this file in any editor to inspect the embedded script.
-#              Works on Debian/Ubuntu, Arch, Fedora.
+#              Works on Debian/Ubuntu, Arch, Fedora, and macOS.
 #
 # TRANSPARENCY: This file contains two scripts concatenated:
 #   Lines 1 ~ N      → installer logic (this code)
-#   After __EMBED__  → screen-tui script (pure Bash, 1402 lines)
+#   After __EMBED__  → screen-tui script (pure Bash, ~1400+ lines)
 #
 # INSPECT THE EMBEDDED SCRIPT:
 #   ./install-screen-tui.sh --extract | less       # View original source
@@ -18,192 +18,291 @@
 #
 # HOW IT WORKS:
 #   - Bash executes lines 1 to 'exit 0' (the installer)
-#   - Everything after '__EMBED__' is the screen-tui script, never executed directly
+#   - Everything after '__EMBED__' is the screen-tui script, never executed
 #   - install_script() uses sed to extract content after the marker
+#   - Version is auto-detected from the embedded script at runtime
 #
 # =============================================================================
 #
 # Usage:
-#   ./install-screen-tui.sh                Full install (script + hooks + PATH)
-#   ./install-screen-tui.sh --update       Update screen-tui from embedded copy
-#   ./install-screen-tui.sh --uninstall    Remove screen-tui and all hooks
-#   ./install-screen-tui.sh --extract      Print embedded screen-tui source to stdout
-#   ./install-screen-tui.sh --help         Show help
-#   ./install-screen-tui.sh --version      Show version
+#   ./install-screen-tui.sh                 Full install (script + hooks + PATH)
+#   ./install-screen-tui.sh --update        Update screen-tui from embedded copy
+#   ./install-screen-tui.sh --uninstall     Remove screen-tui and all hooks
+#   ./install-screen-tui.sh --extract       Print embedded screen-tui source
+#   ./install-screen-tui.sh --help          Show help
+#   ./install-screen-tui.sh --version       Show version
+#
+# One-line install:
+#   curl -sL https://raw.githubusercontent.com/ryzen30xx/Screen-manager/main/install-screen-tui.sh | bash
 # =============================================================================
 
 set -euo pipefail
 
-# ── Constants ──────────────────────────────────────────────────────────────────
-INSTALLER_VERSION="2.3.0"
-SCREEN_TUI_VERSION="5.1.0"
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 1: Constants & Configuration
+# ═════════════════════════════════════════════════════════════════════════════
+
+INSTALLER_VERSION="3.0.0"
 INSTALL_DIR="$HOME/.local/bin"
 SCRIPT_NAME="screen-tui"
 INSTALL_PATH="$INSTALL_DIR/$SCRIPT_NAME"
-INSTALLER_PATH="$INSTALL_DIR/install-screen-tui"
 EMBED_MARKER="__EMBED__"
 
-# ── Marker strings for idempotent hook management ─────────────────────────────
+# ── Marker strings for idempotent hook management ──────────────────────────
+# These markers delimit installer-managed blocks in shell config files.
+# The installer only touches content between these markers.
 HOOK_MARKER="# >>> screen-tui auto-launch (install-screen-tui) >>>"
 HOOK_ENDMARKER="# <<< screen-tui auto-launch (install-screen-tui) <<<"
 PATH_MARKER="# >>> screen-tui PATH (install-screen-tui) >>>"
 PATH_ENDMARKER="# <<< screen-tui PATH (install-screen-tui) <<<"
 
-# ── Colors ─────────────────────────────────────────────────────────────────────
-BOLD='\x1b[1m'; GREEN='\x1b[1;32m'; YELLOW='\x1b[1;33m'
-RED='\x1b[1;31m'; CYAN='\x1b[1;36m'; BLUE='\x1b[1;34m'; RESET='\x1b[0m'
+# ── Shell config files to manage (in order of priority) ────────────────────
+SHELL_CONFIGS=(
+    "$HOME/.zshrc"
+    "$HOME/.bashrc"
+    "$HOME/.zprofile"
+    "$HOME/.profile"
+)
 
-# =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
+# ── Terminal colors ────────────────────────────────────────────────────────
+BOLD='\x1b[1m'
+GREEN='\x1b[1;32m'
+YELLOW='\x1b[1;33m'
+RED='\x1b[1;31m'
+CYAN='\x1b[1;36m'
+BLUE='\x1b[1;34m'
+RESET='\x1b[0m'
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 2: Utility Functions
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── print_header() — Display installer banner ──────────────────────────────
 print_header() {
+    local ver; ver=$(detect_embedded_version)
     printf "${CYAN}══════════════════════════════════════════════════════${RESET}\n"
-    printf "${CYAN}     screen-tui v${SCREEN_TUI_VERSION} — Installer v${INSTALLER_VERSION}${RESET}\n"
+    printf "${CYAN}     screen-tui v${ver} — Installer v${INSTALLER_VERSION}${RESET}\n"
     printf "${CYAN}══════════════════════════════════════════════════════${RESET}\n\n"
 }
+
+# ── Logging helpers ────────────────────────────────────────────────────────
 print_step()  { printf "${BLUE}  →${RESET} %s\n" "$1"; }
 print_ok()    { printf "    ${GREEN}✓${RESET} %s\n" "$1"; }
 print_warn()  { printf "    ${YELLOW}⚠${RESET} %s\n" "$1"; }
 print_error() { printf "    ${RED}✗${RESET} %s\n" "$1"; }
 
-# =============================================================================
-# extract_embedded() — Extract the embedded screen-tui script from this file
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 3: Embedded Script Extraction
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── extract_embedded() — Extract screen-tui from this installer file ───────
 # Reads everything after the __EMBED__ marker line and writes to stdout.
-# No decoding needed — the content is plain text.
-# =============================================================================
+# The content is plain text — no decoding, no base64, no tricks.
+# Uses sed with range addressing: delete lines 0 through /^__EMBED__$/, print rest.
 extract_embedded() {
     sed '0,/^'"${EMBED_MARKER}"'$/d' "${BASH_SOURCE[0]:-$0}"
 }
 
-# =============================================================================
-# detect_package_manager() — Detect system package manager
-# =============================================================================
+# ── detect_embedded_version() — Auto-detect screen-tui version from embedded
+# Parses the "# Version: X.Y.Z" line from the embedded script.
+# Returns version string, or "unknown" if detection fails.
+detect_embedded_version() {
+    local ver
+    ver=$(extract_embedded | grep -m1 '^# Version:' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    echo "${ver:-unknown}"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 4: System Detection & Prerequisites
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── detect_package_manager() — Identify the system package manager ─────────
 detect_package_manager() {
-    if command -v apt &>/dev/null; then echo "apt"
+    if command -v apt &>/dev/null; then      echo "apt"
     elif command -v pacman &>/dev/null; then echo "pacman"
-    elif command -v dnf &>/dev/null; then echo "dnf"
+    elif command -v dnf &>/dev/null; then    echo "dnf"
+    elif command -v brew &>/dev/null; then   echo "brew"
     else echo "unknown"; fi
 }
 
-# =============================================================================
-# check_screen() — Verify GNU Screen is installed; offer to install if missing
-# =============================================================================
+# ── check_screen() — Verify GNU Screen is installed; offer to install ──────
+# Returns 0 if screen is available (or user chooses to skip install).
+# Returns 1 if installation fails.
 check_screen() {
     print_step "Checking for GNU Screen..."
     if command -v screen &>/dev/null; then
-        local ver; ver=$(screen --version 2>/dev/null | head -1 || echo "unknown version")
+        local ver
+        ver=$(screen --version 2>/dev/null | head -1 || echo "unknown version")
         print_ok "GNU Screen found: $ver"
         return 0
     fi
+
     print_warn "GNU Screen is not installed."
-    printf "    screen-tui requires GNU Screen. Install now? [Y/n] "
+    printf "    screen-tui requires GNU Screen to function.\n"
+    printf "    Install GNU Screen now? [Y/n] "
     local choice; IFS= read -r choice
     if [[ "$choice" =~ ^[Nn] ]]; then
-        print_warn "Skipping. screen-tui will warn when run."
+        print_warn "Skipping screen installation. screen-tui will warn when run."
         return 0
     fi
+
     local pm; pm=$(detect_package_manager)
+    print_step "Installing GNU Screen via $pm..."
     case "$pm" in
-        apt)   print_step "Installing via apt...";   sudo apt install -y screen || { print_error "Failed."; return 1; } ;;
-        pacman) print_step "Installing via pacman..."; sudo pacman -S --noconfirm screen || { print_error "Failed."; return 1; } ;;
-        dnf)   print_step "Installing via dnf...";   sudo dnf install -y screen || { print_error "Failed."; return 1; } ;;
-        *)     print_error "Cannot detect package manager. Install screen manually."; return 1 ;;
+        apt)
+            sudo apt update -qq && sudo apt install -y screen || {
+                print_error "Failed to install screen via apt."; return 1
+            } ;;
+        pacman)
+            sudo pacman -S --noconfirm screen || {
+                print_error "Failed to install screen via pacman."; return 1
+            } ;;
+        dnf)
+            sudo dnf install -y screen || {
+                print_error "Failed to install screen via dnf."; return 1
+            } ;;
+        brew)
+            brew install screen || {
+                print_error "Failed to install screen via brew."; return 1
+            } ;;
+        *)
+            print_error "Cannot detect package manager. Please install GNU Screen manually:"
+            printf "      Debian/Ubuntu:  sudo apt install screen\n"
+            printf "      Arch Linux:     sudo pacman -S screen\n"
+            printf "      Fedora:         sudo dnf install screen\n"
+            printf "      macOS:          brew install screen\n"
+            return 1
+            ;;
     esac
-    print_ok "GNU Screen installed."
+    print_ok "GNU Screen installed successfully."
+    return 0
 }
 
-# =============================================================================
-# create_install_dir() — Ensure ~/.local/bin exists
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 5: Installation Core
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── create_install_dir() — Ensure ~/.local/bin exists ──────────────────────
 create_install_dir() {
     print_step "Ensuring $INSTALL_DIR exists..."
-    if [[ -d "$INSTALL_DIR" ]]; then print_ok "$INSTALL_DIR already exists."
-    else mkdir -p "$INSTALL_DIR"; print_ok "Created $INSTALL_DIR"; fi
+    if [[ -d "$INSTALL_DIR" ]]; then
+        print_ok "$INSTALL_DIR already exists."
+    else
+        mkdir -p "$INSTALL_DIR" || {
+            print_error "Failed to create $INSTALL_DIR"
+            exit 1
+        }
+        print_ok "Created $INSTALL_DIR"
+    fi
 }
 
-# =============================================================================
-# check_existing() — Check if screen-tui is already installed
-# =============================================================================
+# ── check_existing() — Check if screen-tui is already installed ────────────
+# Prompts user whether to overwrite. Returns 0 to proceed, 1 to abort.
 check_existing() {
     if [[ -f "$INSTALL_PATH" ]]; then
-        local ev; ev=$(grep -m1 '^# Version:' "$INSTALL_PATH" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        local ev
+        ev=$(grep -m1 '^# Version:' "$INSTALL_PATH" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
         ev="${ev:-unknown}"
+        local new_ver; new_ver=$(detect_embedded_version)
         print_warn "screen-tui already installed (v$ev)."
-        printf "    Embedded version is v${SCREEN_TUI_VERSION}. Reinstall/update? [Y/n] "
+        printf "    Embedded version is v${new_ver}. Reinstall/update? [Y/n] "
         local choice; IFS= read -r choice
-        if [[ "$choice" =~ ^[Nn] ]]; then print_ok "Keeping existing."; return 1; fi
+        if [[ "$choice" =~ ^[Nn] ]]; then
+            print_ok "Keeping existing installation."
+            return 1
+        fi
     fi
     return 0
 }
 
-# =============================================================================
-# install_script() — Extract and write screen-tui to ~/.local/bin/
-# =============================================================================
+# ── install_script() — Extract and write screen-tui to ~/.local/bin/ ──────
 install_script() {
-    print_step "Writing screen-tui v${SCREEN_TUI_VERSION} to $INSTALL_PATH..."
+    local ver; ver=$(detect_embedded_version)
+    print_step "Writing screen-tui v${ver} to $INSTALL_PATH..."
     extract_embedded > "$INSTALL_PATH" || {
         print_error "Failed to extract embedded script."
         exit 1
     }
     chmod +x "$INSTALL_PATH"
-    print_ok "Installed: $INSTALL_PATH ($(wc -l < "$INSTALL_PATH") lines)"
+    local lines; lines=$(wc -l < "$INSTALL_PATH")
+    print_ok "Installed: $INSTALL_PATH ($lines lines)"
 }
 
-# =============================================================================
-# is_dir_in_path() — Check if a directory is in the runtime PATH
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 6: PATH Setup
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── is_dir_in_path() — Check if a directory is in the current PATH ─────────
 is_dir_in_path() {
     [[ ":$PATH:" == *":$1:"* ]]
 }
 
-# =============================================================================
-# setup_path() — Add ~/.local/bin to PATH in all shell configs (marker-based)
-# =============================================================================
+# ── setup_path() — Add ~/.local/bin to PATH in shell config files ──────────
+# Uses marker-delimited blocks for safe idempotent install/uninstall.
 setup_path() {
     print_step "Setting up PATH for $INSTALL_DIR..."
+
+    # Check runtime PATH
     if is_dir_in_path "$INSTALL_DIR"; then
         print_ok "$INSTALL_DIR is already in your runtime PATH."
     else
         print_warn "$INSTALL_DIR is not in current PATH (will take effect in new shells)."
     fi
-    local configs=("$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile")
-    local added=false
+
     local path_line='export PATH="$HOME/.local/bin:$PATH"'
     local path_block
+    # Build marker-delimited PATH block
     read -r -d '' path_block << PATHBLOCK || true
 ${PATH_MARKER}
 ${path_line}
 ${PATH_ENDMARKER}
 PATHBLOCK
-    for cfg in "${configs[@]}"; do
+
+    local added=false
+    for cfg in "${SHELL_CONFIGS[@]}"; do
         [[ -f "$cfg" ]] || continue
         if grep -qF "$PATH_MARKER" "$cfg" 2>/dev/null; then
             print_ok "PATH marker already in $(basename "$cfg")"
         elif grep -qF '.local/bin' "$cfg" 2>/dev/null; then
             print_ok ".local/bin already referenced in $(basename "$cfg")"
         else
-            printf '\n%s\n' "$path_block" >> "$cfg"
+            printf '\n%s\n' "$path_block" >> "$cfg" || {
+                print_warn "Could not write to $(basename "$cfg")"
+                continue
+            }
             print_ok "Added PATH to $(basename "$cfg")"
             added=true
         fi
     done
+
     if ! $added && ! is_dir_in_path "$INSTALL_DIR"; then
-        print_warn "No shell configs found to update. Add manually: $path_line"
+        print_warn "No shell configs found to update. Add manually:"
+        printf "      %s\n" "$path_line"
     fi
 }
 
-# =============================================================================
-# add_hooks() — Add screen-tui auto-launch hooks to ALL shell configs
-# Uses marker-delimited blocks for safe idempotent add/remove.
-# No exec — calls screen-tui directly so Ctrl+X returns to terminal.
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 7: Auto-Launch Hooks
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── add_hooks() — Add auto-launch hooks to ALL shell config files ──────────
+# Installs marker-delimited blocks containing:
+#   1. Auto-launch screen-tui when NOT in a screen session (TTY, interactive)
+#   2. Screen session indicator when INSIDE a screen session
+# Hooks are idempotent — safe to run multiple times.
 add_hooks() {
     print_step "Adding auto-launch hooks to shell configs..."
+
     local hook_block
     read -r -d '' hook_block << 'HOOKBLOCK' || true
 ${HOOK_MARKER}
-# Auto-display the Screen session management TUI on login/SSH.
-# Conditions: not inside screen, has TTY, interactive shell, script exists.
+# ── screen-tui Auto-Launch & Session Indicator ──────────────────────────
+# Managed by install-screen-tui.sh — do not edit manually.
+# To remove: run install-screen-tui.sh --uninstall
+
+# 1) Auto-launch screen-tui when NOT inside a screen session
+#    Conditions: no STY (not in screen), TTY present, interactive shell,
+#    terminal is not "dumb", script exists and is executable.
 if [[ -z "$STY" ]] && [[ -t 0 ]] && [[ "$TERM" != "dumb" ]] && [[ $- =~ i ]] && [[ -x ~/.local/bin/screen-tui ]]; then
     if command -v screen &>/dev/null; then
         ~/.local/bin/screen-tui
@@ -213,7 +312,8 @@ if [[ -z "$STY" ]] && [[ -t 0 ]] && [[ "$TERM" != "dumb" ]] && [[ $- =~ i ]] && 
     fi
 fi
 
-# Show current screen session name when already inside a screen session.
+# 2) Screen session indicator — show current session name when inside screen
+#    Sets terminal title and prints a subtle indicator line.
 if [[ -n "$STY" ]] && [[ -t 0 ]] && [[ "$TERM" != "dumb" ]] && [[ $- =~ i ]]; then
     SCREEN_NAME="${STY#*.}"
     printf '\033[1;32mScreen: %s \342\224\200\342\224\200\342\226\270\033[0m\n' "$SCREEN_NAME"
@@ -221,59 +321,88 @@ if [[ -n "$STY" ]] && [[ -t 0 ]] && [[ "$TERM" != "dumb" ]] && [[ $- =~ i ]]; th
 fi
 ${HOOK_ENDMARKER}
 HOOKBLOCK
-    local configs=("$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile")
+
     local added_any=false
-    for cfg in "${configs[@]}"; do
+    for cfg in "${SHELL_CONFIGS[@]}"; do
         [[ -f "$cfg" ]] || continue
         if grep -qF "$HOOK_MARKER" "$cfg" 2>/dev/null; then
             print_ok "Hook already in $(basename "$cfg")"
         else
-            printf '\n%s\n' "$hook_block" >> "$cfg"
+            printf '\n%s\n' "$hook_block" >> "$cfg" || {
+                print_warn "Could not write to $(basename "$cfg")"
+                continue
+            }
             print_ok "Added hook to $(basename "$cfg")"
             added_any=true
         fi
     done
+
     if ! $added_any; then
         print_warn "No new hooks added (already present or no shell configs found)."
     fi
 }
 
-# =============================================================================
-# self_install() — Copy this installer to ~/.local/bin/ for later --update use
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 8: Self-Installation (installer persistence)
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── self_install() — Copy installer to ~/.local/bin/ for future --update ───
+# Allows users to run `install-screen-tui --update` without re-downloading.
 self_install() {
     local src; src="${BASH_SOURCE[0]:-$0}"
-    if [[ "$src" != "$INSTALLER_PATH" ]]; then
-        cp "$src" "$INSTALLER_PATH" 2>/dev/null && chmod +x "$INSTALLER_PATH" && \
-            print_ok "Installer saved to $INSTALLER_PATH" || \
-            print_warn "Could not copy installer to $INSTALLER_PATH (--update from download will still work)"
+    local dst="$INSTALL_DIR/install-screen-tui"
+
+    # Resolve source to absolute path if possible
+    if [[ "$src" != /* ]]; then
+        src="$(pwd)/$src"
+    fi
+
+    # Only copy if source is different from destination
+    if [[ "$src" != "$dst" ]] && [[ -f "$src" ]]; then
+        if cp "$src" "$dst" 2>/dev/null; then
+            chmod +x "$dst"
+            print_ok "Installer saved to $dst"
+        else
+            print_warn "Could not copy installer to $dst (--update from download will still work)"
+        fi
     fi
 }
 
-# =============================================================================
-# print_success() — Final success message
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 9: Success Display
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── print_success() — Display post-install summary ─────────────────────────
 print_success() {
+    local ver; ver=$(detect_embedded_version)
     printf '\n'
     printf "${GREEN}══════════════════════════════════════════════════════${RESET}\n"
-    printf "${GREEN}  ✓ screen-tui v${SCREEN_TUI_VERSION} installed!${RESET}\n"
+    printf "${GREEN}  ✓ screen-tui v${ver} installed successfully!${RESET}\n"
     printf "${GREEN}══════════════════════════════════════════════════════${RESET}\n\n"
     printf "  ${BOLD}Quick start:${RESET}\n"
-    printf '    source ~/.zshrc   (or ~/.bashrc)\n'
+    printf '    source ~/.zshrc    # (or ~/.bashrc / ~/.profile)\n'
     printf '    screen-tui --help\n\n'
     printf "  ${BOLD}Commands:${RESET}\n"
-    printf '    screen-tui                    Launch TUI\n'
-    printf '    install-screen-tui --extract  View embedded source\n'
-    printf '    install-screen-tui --update   Update screen-tui\n'
-    printf '    install-screen-tui --uninstall  Remove everything\n\n'
+    printf '    screen-tui                     Launch the TUI\n'
+    printf '    install-screen-tui --extract   View embedded source\n'
+    printf '    install-screen-tui --update    Update screen-tui\n'
+    printf '    install-screen-tui --uninstall Remove everything\n\n'
+    printf "  ${BOLD}Installed to:${RESET} $INSTALL_PATH\n"
+    printf "  ${BOLD}Hooks added to:${RESET} ~/.zshrc ~/.bashrc ~/.zprofile ~/.profile\n"
+    printf "  ${BOLD}Quit key:${RESET} Ctrl+X (inside screen-tui)\n\n"
 }
 
-# =============================================================================
-# do_install() — Full installation
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 10: Full Install
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── do_install() — Perform complete installation ────────────────────────────
 do_install() {
     print_header
-    check_screen || { print_error "Screen check failed."; exit 1; }
+    check_screen || {
+        print_error "Screen installation check failed. Aborting."
+        exit 1
+    }
     check_existing || return 0
     create_install_dir
     install_script
@@ -283,98 +412,154 @@ do_install() {
     print_success
 }
 
-# =============================================================================
-# do_update() — Update screen-tui script only (skip hooks and PATH)
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 11: Update (script only)
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── do_update() — Update screen-tui script, leave hooks and PATH untouched ──
 do_update() {
     print_header
-    printf "${YELLOW}  Update mode: script only (hooks/PATH unchanged)${RESET}\n\n"
+    printf "${YELLOW}  Update mode: script only (hooks and PATH unchanged)${RESET}\n\n"
+
     if [[ ! -f "$INSTALL_PATH" ]]; then
-        print_warn "screen-tui is not installed. Use full install instead."
+        print_warn "screen-tui is not installed. Use full install instead:"
         printf "    Run: install-screen-tui.sh (without --update)\n"
         exit 1
     fi
-    local old_ver; old_ver=$(grep -m1 '^# Version:' "$INSTALL_PATH" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+
+    local old_ver
+    old_ver=$(grep -m1 '^# Version:' "$INSTALL_PATH" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
     old_ver="${old_ver:-unknown}"
-    print_step "Current: v$old_ver  →  New: v${SCREEN_TUI_VERSION}"
-    if [[ "$old_ver" == "$SCREEN_TUI_VERSION" ]]; then
-        print_ok "Already at latest version (v${SCREEN_TUI_VERSION})."
+    local new_ver; new_ver=$(detect_embedded_version)
+
+    print_step "Current: v$old_ver  →  New: v${new_ver}"
+
+    if [[ "$old_ver" == "$new_ver" ]]; then
+        print_ok "Already at latest version (v${new_ver})."
         exit 0
     fi
-    create_install_dir
-    extract_embedded > "$INSTALL_PATH" || { print_error "Extract failed."; exit 1; }
+
+    # Write updated script
+    extract_embedded > "$INSTALL_PATH" || {
+        print_error "Failed to extract embedded script."
+        exit 1
+    }
     chmod +x "$INSTALL_PATH"
     print_ok "Updated: $INSTALL_PATH"
+
     printf '\n'
-    printf "${GREEN}  ✓ screen-tui updated: ${old_ver} → ${SCREEN_TUI_VERSION}${RESET}\n\n"
+    printf "${GREEN}  ✓ screen-tui updated: ${old_ver} → ${new_ver}${RESET}\n\n"
 }
 
-# =============================================================================
-# remove_hooks() — Remove all marker-based hooks and PATH blocks
-# Also handles legacy old-installer format as fallback.
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 12: Uninstall
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── remove_hooks() — Remove marker-delimited blocks and legacy artifacts ───
+# Cleans up both current marker-based blocks and legacy old-format blocks.
 remove_hooks() {
-    print_step "Removing hooks and PATH additions..."
-    local configs=("$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile")
-    for cfg in "${configs[@]}"; do
+    print_step "Removing hooks and PATH additions from shell configs..."
+
+    for cfg in "${SHELL_CONFIGS[@]}"; do
         [[ -f "$cfg" ]] || continue
-        local tmpfile; tmpfile=$(mktemp)
-        # Remove marker-delimited blocks (HOOK + PATH markers)
+
+        local tmpfile; tmpfile=$(mktemp) || {
+            print_warn "Could not create temp file for $(basename "$cfg")"
+            continue
+        }
+
+        # Remove marker-delimited blocks (both HOOK and PATH markers)
         sed -e "/^# >>> screen-tui auto-launch/,/^# <<< screen-tui auto-launch/d" \
             -e "/^# >>> screen-tui PATH/,/^# <<< screen-tui PATH/d" \
             "$cfg" > "$tmpfile"
-        # Legacy cleanup: old format without markers
+
+        # Legacy cleanup: old format without proper markers (Phase-based comments)
         if grep -qF "screen-tui auto-launch (Phase" "$tmpfile" 2>/dev/null; then
             awk '
                 /^#.*screen-tui auto-launch/ { in_block=1; next }
-                in_block && /^fi$/ { in_block=0; next }
+                in_block && /^fi$/              { in_block=0; next }
                 !in_block { print }
             ' "$tmpfile" > "${tmpfile}.2"
             mv "${tmpfile}.2" "$tmpfile"
         fi
-        # Remove legacy PATH lines
+
+        # Legacy: remove old "Added by install-screen-tui" PATH lines
         if grep -qF "Added by install-screen-tui" "$tmpfile" 2>/dev/null; then
             grep -vF "Added by install-screen-tui" "$tmpfile" | \
                 grep -vF 'export PATH="$HOME/.local/bin:$PATH"' > "${tmpfile}.2" || true
             mv "${tmpfile}.2" "$tmpfile"
         fi
+
+        # Only overwrite if changes were made
         if ! diff -q "$cfg" "$tmpfile" &>/dev/null; then
-            mv "$tmpfile" "$cfg"
-            print_ok "Cleaned $(basename "$cfg")"
-        else
-            rm -f "$tmpfile"
+            cp "$tmpfile" "$cfg" || {
+                print_warn "Could not update $(basename "$cfg")"
+                rm -f "$tmpfile"
+                continue
+            }
+            print_ok "Cleaned hooks from $(basename "$cfg")"
         fi
+
+        rm -f "$tmpfile"
     done
+
+    # Remove warning suppression file
     rm -f "$HOME/.screen_tui_warned"
 }
 
-# =============================================================================
-# do_uninstall() — Remove everything
-# =============================================================================
+# ── do_uninstall() — Remove screen-tui, hooks, and installer copy ──────────
 do_uninstall() {
     print_header
-    printf "${YELLOW}  This will remove screen-tui and all related hooks.${RESET}\n"
+    printf "${YELLOW}  This will remove screen-tui and all related shell hooks.${RESET}\n"
+    printf "  The following will be removed:\n"
+    printf "    - %s\n" "$INSTALL_PATH"
+    printf "    - %s\n" "$INSTALL_DIR/install-screen-tui"
+    printf "    - All screen-tui hooks from shell configs\n"
+    printf "    - ~/.screen_tui_warned\n"
+    printf "\n"
     printf "  Continue? [y/N] "
     local choice; IFS= read -r choice
-    if [[ ! "$choice" =~ ^[Yy] ]]; then print_ok "Cancelled."; exit 0; fi
+    if [[ ! "$choice" =~ ^[Yy] ]]; then
+        print_ok "Uninstall cancelled."
+        exit 0
+    fi
+
     printf '\n'
-    if [[ -f "$INSTALL_PATH" ]]; then rm -f "$INSTALL_PATH"; print_ok "Removed $INSTALL_PATH"; fi
-    if [[ -f "$INSTALLER_PATH" ]]; then rm -f "$INSTALLER_PATH"; print_ok "Removed $INSTALLER_PATH"; fi
+
+    # Remove binary
+    if [[ -f "$INSTALL_PATH" ]]; then
+        rm -f "$INSTALL_PATH"
+        print_ok "Removed $INSTALL_PATH"
+    else
+        print_ok "screen-tui binary not found (already removed)"
+    fi
+
+    # Remove installer copy
+    if [[ -f "$INSTALL_DIR/install-screen-tui" ]]; then
+        rm -f "$INSTALL_DIR/install-screen-tui"
+        print_ok "Removed $INSTALL_DIR/install-screen-tui"
+    fi
+
+    # Remove hooks
     remove_hooks
+
     printf '\n'
-    printf "${GREEN}  ✓ screen-tui uninstalled.${RESET}\n"
-    printf '    ~/.local/bin was NOT removed.\n'
+    printf "${GREEN}  ✓ screen-tui uninstalled completely.${RESET}\n"
+    printf '    ~/.local/bin directory was NOT removed.\n'
     printf '    GNU Screen was NOT removed.\n\n'
 }
 
-# =============================================================================
-# show_help() — Print usage
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 13: Help & Version
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── show_help() — Print usage information ──────────────────────────────────
 show_help() {
-    echo "install-screen-tui.sh version ${INSTALLER_VERSION}"
-    echo "Embedded screen-tui version: ${SCREEN_TUI_VERSION}"
-    echo ""
+    local ver; ver=$(detect_embedded_version)
     cat << HELPEOF
+install-screen-tui.sh — Installer version ${INSTALLER_VERSION}
+Embedded screen-tui version: ${ver}
+
 Usage: install-screen-tui.sh [OPTIONS]
 
 A self-contained installer for screen-tui — GNU Screen Terminal UI Manager.
@@ -383,40 +568,48 @@ Use --extract to inspect the original source code before installing.
 No encoding, no base64 — open this file in any editor to see the code.
 
 Options:
-  --help        Show this help message and exit
-  --version     Show version information and exit
-  --extract     Print the embedded screen-tui source code to stdout (for inspection)
-  --uninstall   Remove screen-tui and all shell hooks
-  --update      Update screen-tui script only (skip hooks and PATH)
+  --help, -h      Show this help message and exit
+  --version, -V   Show version information and exit
+  --extract       Print the embedded screen-tui source to stdout
+  --uninstall     Remove screen-tui and all shell hooks
+  --update, -u    Update screen-tui script only (skip hooks and PATH)
 
 What this installer does:
   1. Checks for GNU Screen (offers to install if missing)
   2. Creates ~/.local/bin/ if needed
   3. Extracts screen-tui from this file and writes to ~/.local/bin/
-  4. Adds ~/.local/bin to PATH in shell configs
-  5. Adds auto-launch hooks to ~/.zshrc, ~/.bashrc, ~/.bash_profile, ~/.profile
+  4. Adds ~/.local/bin to PATH in shell config files
+  5. Adds auto-launch hooks to ~/.zshrc, ~/.bashrc, ~/.zprofile, ~/.profile
   6. Copies itself to ~/.local/bin/install-screen-tui for future updates
 
-Supported: Debian/Ubuntu, Arch Linux, Fedora
+Shell configs managed:
+  ~/.zshrc ~/.bashrc ~/.zprofile ~/.profile
 
-After install, screen-tui auto-launches on every new terminal.
-Press Ctrl+X inside screen-tui to quit to normal terminal.
+Supported platforms:
+  Debian/Ubuntu, Arch Linux, Fedora, macOS (Homebrew)
+
+One-line install:
+  curl -sL https://raw.githubusercontent.com/ryzen30xx/Screen-manager/main/install-screen-tui.sh | bash
+
+After installation:
+  screen-tui auto-launches on every new terminal session.
+  Press Ctrl+X inside screen-tui to quit to normal terminal.
 HELPEOF
     exit 0
 }
 
-# =============================================================================
-# show_version() — Print version info
-# =============================================================================
+# ── show_version() — Print version information ─────────────────────────────
 show_version() {
+    local ver; ver=$(detect_embedded_version)
     echo "install-screen-tui.sh version ${INSTALLER_VERSION}"
-    echo "Embedded screen-tui version: ${SCREEN_TUI_VERSION}"
+    echo "Embedded screen-tui version: ${ver}"
     exit 0
 }
 
-# =============================================================================
-# MAIN ENTRY POINT
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 14: Main Entry Point
+# ═════════════════════════════════════════════════════════════════════════════
+
 case "${1:-}" in
     --help|-h)       show_help ;;
     --version|-V)    show_version ;;
@@ -424,13 +617,16 @@ case "${1:-}" in
     --uninstall)     do_uninstall ;;
     --update|-u)     do_update ;;
     "")              do_install ;;
-    *)               echo "install-screen-tui.sh: unknown option: $1" >&2
-                     echo "Try --help for usage." >&2; exit 1 ;;
+    *)
+        echo "install-screen-tui.sh: unknown option: $1" >&2
+        echo "Try 'install-screen-tui.sh --help' for usage information." >&2
+        exit 1
+        ;;
 esac
 
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
 # EMBEDDED SCRIPT — screen-tui
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
 # WHAT THIS IS:
 #   Everything below the __EMBED__ marker is the COMPLETE screen-tui source
 #   code. It is pure Bash, NOT encoded, NOT compiled, NOT obfuscated.
@@ -445,7 +641,7 @@ esac
 #
 # This section is never executed. The installer exits before reaching
 # this point (see 'exit 0' in the case/esac block above).
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
 exit 0
 __EMBED__
 #!/usr/bin/env bash
@@ -941,6 +1137,7 @@ execute_kill() {
     # ── Center the box ──
     local pad=$(( (cols - box_w) / 2 ))
     [[ $pad -lt 0 ]] && pad=0
+    [[ -z "${pad:-}" ]] && pad=0
 
     if $kill_success; then
         # ── Success: show green notification box ──
@@ -992,7 +1189,7 @@ execute_kill() {
 
 # =============================================================================
 # render_empty_ui() — Display UI when no screen sessions exist
-# Shows the session name that will be created and waits for user to press Enter.
+# Simplified: banner + "no sessions" message. Prompt handled by handle_empty_state().
 # =============================================================================
 render_empty_ui() {
     local cols height
@@ -1003,7 +1200,7 @@ render_empty_ui() {
     tput clear 2>/dev/null || printf '\x1b[2J\x1b[H' 2>/dev/null
 
     # ── Top padding (center vertically) ──
-    local top_pad=$(( (height - 14) / 2 ))
+    local top_pad=$(( (height - 10) / 2 ))
     [[ $top_pad -lt 1 ]] && top_pad=1
     local row
     for ((row = 0; row < top_pad; row++)); do printf '\n'; done
@@ -1013,15 +1210,16 @@ render_empty_ui() {
     [[ $box_w -gt $((cols - 4)) ]] && box_w=$((cols - 4))
     local pad=$(( (cols - box_w) / 2 ))
     [[ $pad -lt 0 ]] && pad=0
+    [[ -z "${pad:-}" ]] && pad=0
 
     printf '%*s%s╔' "$pad" "" "$(green)"
     local i
     for ((i = 0; i < box_w - 2; i++)); do printf '═'; done
     printf '╗%s\n' "$(reset)"
 
-    printf '%*s%s║%s  %s[>_]%s SCREEN-TUI v5.0 — GNU Screen Session Manager' \
+    printf '%*s%s║%s  %s[>_]%s SCREEN-TUI v5.1 — GNU Screen Session Manager' \
         "$pad" "" "$(green)" "$(reset)" "$(green)" "$(dim)"
-    local title_text="  [>_] SCREEN-TUI v5.0 — GNU Screen Session Manager"
+    local title_text="  [>_] SCREEN-TUI v5.1 — GNU Screen Session Manager"
     local fill=$((box_w - ${#title_text} - 3))
     [[ $fill -gt 0 ]] && printf '%*s' "$fill" ""
     printf ' %s║%s\n' "$(green)" "$(reset)"
@@ -1038,23 +1236,13 @@ render_empty_ui() {
     printf '╝%s\n\n' "$(reset)"
 
     # ── "No sessions" system message ─────────────────────────────────────
-    printf '%*s%s  ●  %sNo screen sessions detected.%s\n\n' \
+    printf '%*s%s  ●  %sNo active screen sessions found.%s\n\n' \
         "$pad" "" "$(yellow)" "$(white)" "$(reset)"
 
     # ── Status line (simulated terminal boot info) ───────────────────────
-    printf '%*s%s  system ready%s  │  %s%s sessions%s  │  %s%s%s\n\n' \
+    printf '%*s%s  system ready%s  │  %s%s sessions%s  │  %s%s%s%s\n\n' \
         "$pad" "" "$(dim)" "$(reset)" "$(dim)" "$(red)" "$(dim)" "$(reset)" \
         "$(dim)" "$(date +%H:%M:%S)" "$(reset)"
-
-    # ── Keybinding prompts ───────────────────────────────────────────────
-    local sep=''
-    printf -v sep '%*s' "$box_w" ""
-    sep="${sep// /─}"
-
-    printf '%*s%s┌%s%s┐%s\n' "$pad" "" "$(dim)" "$sep" "$(dim)" "$(reset)"
-    printf '%*s%s│%s  %s[Enter]%s  Create new session  │  %s[q/Ctrl+X]%s  Quit        %s│%s\n' \
-        "$pad" "" "$(dim)" "$(reset)" "$(green)" "$(reset)" "$(red)" "$(reset)" "$(dim)" "$(reset)"
-    printf '%*s%s└%s%s┘%s\n' "$pad" "" "$(dim)" "$sep" "$(dim)" "$(reset)"
 }
 
 # =============================================================================
@@ -1105,9 +1293,9 @@ render_menu_ui() {
     for ((j = 0; j < box_w - 2; j++)); do printf '═'; done
     printf '╗%s\n' "$(reset)"
 
-    printf '%s║%s  %s[>_]%s SCREEN-TUI v5.0 — GNU Screen Session Manager' \
+    printf '%s║%s  %s[>_]%s SCREEN-TUI v5.1 — GNU Screen Session Manager' \
         "$(green)" "$(reset)" "$(green)" "$(dim)"
-    local hdr_text="  [>_] SCREEN-TUI v5.0 — GNU Screen Session Manager"
+    local hdr_text="  [>_] SCREEN-TUI v5.1 — GNU Screen Session Manager"
     local hdr_fill=$((box_w - ${#hdr_text} - 3))
     [[ $hdr_fill -gt 0 ]] && printf '%*s' "$hdr_fill" ""
     printf ' %s║%s\n' "$(green)" "$(reset)"
@@ -1262,6 +1450,8 @@ render_confirm_kill_modal() {
     local mt=$(( (height - mh) / 2 ))
     [[ $ml -lt 0 ]] && ml=0
     [[ $mt -lt 0 ]] && mt=0
+    [[ -z "${ml:-}" ]] && ml=0
+    [[ -z "${mt:-}" ]] && mt=0
 
     # ── Clear screen for clean redraw ──
     tput clear 2>/dev/null || printf '\x1b[2J\x1b[H' 2>/dev/null
@@ -1512,37 +1702,109 @@ render_ui() {
 
 # =============================================================================
 # handle_empty_state() — Handle UI when no screen sessions exist
-# Shows empty screen and waits for user to press Enter to create new session.
+# Flow: show banner → prompt for name → validate → create → re-launch.
+# Direct and simple — no intermediate menu, no keybinding loop.
 # =============================================================================
 handle_empty_state() {
-    mode="empty"
-    render_ui
+    # ── Exit alternate buffer FIRST (was entered by setup_terminal) ──
+    # We draw directly on the main screen so the banner stays visible
+    # alongside the input prompt.
+    tput rmcup 2>/dev/null || printf '\x1b[?1049l' 2>/dev/null || true
+    tput cnorm 2>/dev/null || printf '\x1b[?25h' 2>/dev/null || true
 
-    # Loop waiting for user to press Enter or q to quit
+    # ── Calculate layout ──
+    local cols box_w pad
+    cols=$(tput cols 2>/dev/null || echo 80)
+    box_w=58
+    [[ $box_w -gt $((cols - 4)) ]] && box_w=$((cols - 4))
+    pad=$(( (cols - box_w) / 2 ))
+    [[ $pad -lt 0 ]] && pad=0
+    [[ -z "${pad:-}" ]] && pad=0
+
+    # ── Clear and draw banner (no vertical centering — main screen) ──
+    tput clear 2>/dev/null || printf '\x1b[2J\x1b[H' 2>/dev/null
+    printf '\n'  # single top margin
+
+    printf '%*s%s╔' "$pad" "" "$(green)"
+    local i
+    for ((i = 0; i < box_w - 2; i++)); do printf '═'; done
+    printf '╗%s\n' "$(reset)"
+
+    printf '%*s%s║%s  %s[>_]%s SCREEN-TUI v5.1 — GNU Screen Session Manager' \
+        "$pad" "" "$(green)" "$(reset)" "$(green)" "$(dim)"
+    local title_text="  [>_] SCREEN-TUI v5.1 — GNU Screen Session Manager"
+    local fill=$((box_w - ${#title_text} - 3))
+    [[ $fill -gt 0 ]] && printf '%*s' "$fill" ""
+    printf ' %s║%s\n' "$(green)" "$(reset)"
+
+    printf '%*s%s║%s  %smade by Experience (DTK)' \
+        "$pad" "" "$(green)" "$(reset)" "$(dim)"
+    local credit_text="  made by Experience (DTK)"
+    local credit_fill=$((box_w - ${#credit_text} - 3))
+    [[ $credit_fill -gt 0 ]] && printf '%*s' "$credit_fill" ""
+    printf ' %s║%s\n' "$(green)" "$(reset)"
+
+    printf '%*s%s╚' "$pad" "" "$(green)"
+    for ((i = 0; i < box_w - 2; i++)); do printf '═'; done
+    printf '╝%s\n' "$(reset)"
+
+    # ── "No sessions" message (centered with banner) ──
+    printf '%*s%s  ●  %sNo active screen sessions found.%s\n' \
+        "$pad" "" "$(yellow)" "$(white)" "$(reset)"
+
+    # ── Status line (centered with banner) ──
+    printf '%*s%s  system ready%s  │  %s%s sessions%s  │  %s%s%s%s\n\n' \
+        "$pad" "" "$(dim)" "$(reset)" "$(dim)" "$(red)" "$(dim)" "$(reset)" \
+        "$(dim)" "$(date +%H:%M:%S)" "$(reset)"
+
+    # ── Prompt (centered to match banner text at pad+3) ──
+    local prompt_line="Enter session name:"
+    local custom_name
+    # Build separator matching banner internal width (box_w - 2)
+    local sep=''
+    local si
+    for ((si = 0; si < box_w - 2; si++)); do sep+='═'; done
+
+    # ── Loop until user enters a valid name ──
     while true; do
-        local key
-        key=$(read_key) || {
-            # read_key failed (EOF) → safe exit
-            cleanup
-        }
+        printf '%*s\x1b[1;36m%s\x1b[0m\n' "$pad" "" "$sep"
+        printf '%*s   %s' "$pad" "" "$prompt_line"
+        printf '\n'
+        printf '%*s\x1b[1;36m%s\x1b[0m\n' "$pad" "" "$sep"
+        printf '\n'
+        printf '%*s   \x1b[1;32m' "$pad" ""
 
-        case "$key" in
-            # Enter — create new session
-            '')
-                create_new_session
-                # create_new_session uses exec "$0" after screen exits,
-                # so control never returns here
-                ;;
-            # q or Q or Ctrl+X (\x18) — clean quit with goodbye
-            q|Q|$'\x18')
-                show_goodbye=true
-                cleanup
-                ;;
-            # Other keys — ignore, keep current screen
-            *)
-                ;;
-        esac
+        IFS= read -r custom_name
+        printf '\x1b[0m\n'
+
+        # ── Reject empty input ──
+        if [[ -z "$custom_name" ]]; then
+            printf '%*s\x1b[1;31m   ERROR: Session name cannot be empty.\x1b[0m\n\n' "$pad" ""
+            continue
+        fi
+
+        # ── Validate: no spaces, no slashes ──
+        if [[ "$custom_name" =~ [[:space:]/] ]]; then
+            printf '%*s\x1b[1;31m   ERROR: Session name cannot contain spaces or slashes.\x1b[0m\n\n' "$pad" ""
+            continue
+        fi
+
+        break
     done
+
+    # ── Create and attach to new screen session ──
+    printf '%*s\x1b[1;33m   Launching screen session: %s ...\x1b[0m\n' "$pad" "" "$custom_name"
+    sleep 0.3
+
+    if "$SCREEN_BIN" -S "$custom_name"; then
+        exec "$0"
+    else
+        printf '\n\x1b[1;31mERROR: Failed to create screen session "%s"\x1b[0m\n' "${custom_name:0:40}" >&2
+        printf 'Check that GNU Screen is installed and functioning.\n' >&2
+        printf 'Press Enter to exit...' >&2
+        read -r _ 2>/dev/null || true
+        exit 1
+    fi
 }
 
 # =============================================================================

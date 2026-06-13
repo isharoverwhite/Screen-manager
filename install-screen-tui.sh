@@ -33,10 +33,27 @@
 #   ./install-screen-tui.sh --version       Show version
 #
 # One-line install:
-#   curl -sL https://raw.githubusercontent.com/ryzen30xx/Screen-manager/main/install-screen-tui.sh | bash
+#   curl -sL https://raw.githubusercontent.com/isharoverwhite/Screen-manager/main/install-screen-tui.sh | bash
 # =============================================================================
 
 set -euo pipefail
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 0: Pipe Detection — Handle "curl | bash" transparently
+# When piped from curl, ${BASH_SOURCE[0]} is "bash" (not a file).
+# We re-download the script to a temp file and re-exec so sed can read it.
+# ═════════════════════════════════════════════════════════════════════════════
+SCRIPT_URL="https://raw.githubusercontent.com/isharoverwhite/Screen-manager/main/install-screen-tui.sh"
+if [[ ! -f "${BASH_SOURCE[0]:-$0}" ]]; then
+    TMPINST=$(mktemp /tmp/install-screen-tui.XXXXXX)
+    curl -sL "$SCRIPT_URL" -o "$TMPINST" || {
+        echo "ERROR: Cannot download installer. Try:" >&2
+        echo "  curl -sL $SCRIPT_URL -o install-screen-tui.sh" >&2
+        echo "  bash install-screen-tui.sh" >&2
+        exit 1
+    }
+    exec bash "$TMPINST" "$@"
+fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 1: Constants & Configuration
